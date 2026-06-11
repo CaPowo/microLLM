@@ -9,10 +9,6 @@ from tokenizer import Tokenizer
 def read_file(filename: str) -> str:
     with open(filename, "r", encoding="utf-8") as f:
         text = f.read()
-
-    print("文本总长度（字符数）:", len(text))
-    print("前 200 个字符预览:\n", text[:200])
-
     return text
 
 # 用tokenizer整个文本编码成一维的long张量
@@ -38,6 +34,6 @@ def get_batch(data: torch.Tensor, block_size: int, batch_size: int):
     random_index = random.sample(range(len(data) - block_size), batch_size)
 
     x = torch.stack([data[i:i+block_size] for i in random_index])
-    y = torch.stack([data[i+1:block_size+1] for i in random_index])
+    y = torch.stack([data[i+1:i+block_size+1] for i in random_index])
 
     return x,y
