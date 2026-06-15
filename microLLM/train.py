@@ -11,7 +11,7 @@ text = read_file("C:\\Users\\15589\\Desktop\\LearnLLM\\microLLM\\tiny_shakespear
 tok = Tokenizer(text) #数据token化
 data = make_data_tensor(text,tok) #构造一维张量
 train, val = train_val_split(data) #分类 训练和验证集
-model = Model(tok.vocab_size)  #创建空白表格
+model = Model(n_embd=32,block_size=8,vocab_size=tok.vocab_size)  #创建空白表格
 
 #2. 超参数
 batch_size = 32  #每一批的序列数

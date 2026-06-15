@@ -2,16 +2,42 @@
 import torch
 import torch.nn as nn
 from  torch.nn import functional as F
+from attention import Head
+
 
 class Model(nn.Module):
     # 制作空白的“分数表”
-    def __init__(self,vocab_size:int):
+    def __init__(self,vocab_size:int,n_embd: int, block_size: int):
         super().__init__()
-        self.token_embedding_table = nn.Embedding(vocab_size,vocab_size)
-    
+        self.block_size = block_size
+
+        # token：编号 → n_embd 维含义向量
+        self.token_embedding_table = nn.Embedding(vocab_size,n_embd)
+        
+        # 位置：位置 → n_embd 维位置向量
+        self.position_embedding_table = nn.Embedding(block_size,n_embd)
+
+        # 注意力头（单头先用 head_size = n_embd）
+        self.sa_head = Head(n_embd, n_embd, block_size)
+        # 输出层：n_embd → vocab_size 个分数
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+
+
     # 预测
     def forward(self, idx:torch.Tensor, targets:torch.Tensor=None):
-        logits = self.token_embedding_table(idx) #生成预测值
+        B, T = idx.shape
+
+        #token 含义向量
+        tok_emb = self.token_embedding_table(idx)
+        #位置向量
+        pos_emb = self.position_embedding_table(torch.arange(T))
+        #相加
+        x = tok_emb + pos_emb
+
+        x = self.sa_head(x)
+
+        logits = self.lm_head(x)
+
         #这是个三维元组 分别对应 B T C 
         #其中 B 是分块数量 T是每个分块的大小 C是总共的分数(也就是vocab_size)
         #生成阶段没有答案不算loss
@@ -37,8 +63,11 @@ class Model(nn.Module):
     def generate(self, idx:torch.Tensor, max_new_tokens: int):
         #idx:(B,T) 分块数量，每个分块的大小
         for _ in range(max_new_tokens):
+
+            idx_cond = idx[:, -self.block_size:]   # 关键：只保留最后 block_size 个
+
             #1. 向前预测，得到 B组语料 每组语料T个token 一共B*T*C的预测结果
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
 
             #2. 只取最后一个位置预测
             logits = logits[:,-1,:]
