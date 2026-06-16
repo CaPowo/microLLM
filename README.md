@@ -48,7 +48,8 @@ LearnLLM/
 ├── microLLM/
 │   ├── tokenizer.py    # Tokenizer 类：建词表 + encode/decode（字符↔数字）
 │   ├── data.py         # read_file / make_data_tensor / train_val_split / get_batch
-│   ├── model.py        # Model：当前是 Bigram（__init__ 建表, forward 预测+算loss, generate 生成）
+│   ├── attention.py    # Head 类：单头自注意力（Q/K/V → 缩放点积 → 因果掩码 → softmax → @V）
+│   ├── model.py        # Model：迷你 Transformer（token+position embedding → sa_head → lm_head）
 │   ├── train.py        # 训练入口：装配 → 优化器 → 训练循环 → 生成对比
 │   ├── test.py         # 临时测试脚本（验证形状、loss、生成）
 │   ├── generate.py     # （预留）训练后加载模型生成文本的入口脚本
@@ -97,13 +98,19 @@ uv run python microLLM/train.py
 - [x] **Tokenizer**：字符级 encode/decode
 - [x] **数据管线**：读取、编码、train/val 切分、批次采样
 - [x] **Bigram 模型**：Embedding → logits → loss → 训练 → 生成（loss ≈ 2.4）
-- [ ] **Attention**：让每个位置加权汇总全部上文，突破 Bigram 天花板 ← 进行中
-- [ ] **Transformer Block**：Multi-Head Attention + FFN + 残差 + LayerNorm
-- [ ] **位置编码**、堆叠多层、调大模型，生成更连贯的文本
+- [x] **单头自注意力**：Q/K/V → 缩放点积 → 因果掩码 → softmax → 加权混合（attention.py）
+- [x] **位置编码 + 迷你 Transformer**：token+position embedding → sa_head → lm_head（loss ≈ 2.3，文本现剧本结构）
+- [ ] **Multi-Head Attention**：多个头并行看不同关系，再合并 ← 下一步
+- [ ] **Feed-Forward（FFN）**：注意力后每个位置单独"消化"
+- [ ] **残差连接 + LayerNorm**：稳定深层训练
+- [ ] **堆叠多个 Block + 调大规模**：loss 可降到 ≈ 1.5，文本更连贯
 
 ---
 
-## Bigram 的局限（为什么还要 Attention）
+## 当前进展：从 Bigram 到迷你 Transformer
 
-当前的 Bigram 模型**只看前一个字符**预测下一个，信息太少，所以学到 loss≈2.4 就到头了。
-Transformer 的 **Attention** 机制让每个位置能"回看前面所有字符并按相关性加权利用"，这才是大模型能写出连贯长文的关键。下一阶段就实现它。
+- **Bigram** 只看前一个字符，loss 到 ≈2.4 就到头了。
+- 加上**自注意力 + 位置编码**后，每个位置能"回看全部上文并按相关性加权利用"，loss 降到 ≈2.3，生成文本开始出现剧本结构和真单词碎片。
+- 提升仍有限，因为目前是**单头、单层、block_size 仅 8**。后续加多头注意力、FFN、残差+LayerNorm、堆叠多层并调大规模，loss 可降到 ≈1.5，文本更连贯。
+
+> 详细的逐题原理见 [docs/QA.md](docs/QA.md)，已覆盖 tokenization、张量、神经网络与梯度下降、预测机制、Q/K/V 自注意力全流程、迷你 Transformer 结构、以及调试经验。
