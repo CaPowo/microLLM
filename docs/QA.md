@@ -68,6 +68,74 @@ token 的**粒度是设计选择**：字符级 / 整词级 / 子词级。
 - 我们用**字符级**纯粹为教学：词表只65、五行写完、省去BPE复杂度，让你专注Transformer。
 - 原理完全一样，**粒度可插拔，架构才是核心**。
 
+### Q：如果想用中文训练数据，需要改 Transformer 吗？
+不需要改 Transformer 主体。模型本质还是：
+```text
+前面的 token → 预测下一个 token
+```
+
+要改的是**训练数据和 tokenizer 的词表**。如果使用字符级 tokenizer，它会对训练文本里出现过的每个不同字符建一个编号。英文莎士比亚数据里词表大约是65个字符；换成中文数据后，词表会变成：
+```text
+所有出现过的汉字 + 标点 + 换行 + 空格
+```
+
+字符级中文训练可以这样运行：
+```bash
+uv run python microLLM/train.py --data microLLM/chinese.txt --checkpoint microLLM/chinese_best_model.pt --start "从前"
+```
+
+如果要使用 BPE / subword tokenizer，则加上 `--tokenizer bpe`：
+```bash
+uv run python microLLM/train.py --data microLLM/chinese.txt --checkpoint microLLM/chinese_bpe_model.pt --tokenizer bpe --bpe-merges 500 --start "从前"
+```
+
+生成时加载同一个 BPE checkpoint：
+```bash
+uv run python microLLM/generate.py --checkpoint microLLM/chinese_bpe_model.pt --start "从前" --max-new-tokens 300 --temperature 0.8
+```
+
+注意：生成时输入的 `--start` 里的字符必须在训练数据里出现过。比如训练数据从没出现过"龙"，那 `--start "龙"` 就没法编码。
+
+### Q：现在的分词方案不还是字符级吗？
+之前是。只是把 `--data` 改成中文数据时，本质仍然是字符级，只是词表从英文字母变成了汉字。
+
+现在项目里新增了两种选择：
+```text
+--tokenizer char：字符级，每个字符一个 token
+--tokenizer bpe：BPE/subword，把高频相邻 token 合并成更大的片段
+```
+
+例如中文里，字符级看到的是：
+```text
+人 / 工 / 智 / 能 / 很 / 有 / 趣
+```
+
+BPE 训练后可能看到的是：
+```text
+人工 / 智能 / 很 / 有趣
+```
+
+这样模型生成时不是每次都从单个字重新拼词，而是可以直接选择常见词语片段，所以常见词更稳定，句子会更像自然文本。
+
+### Q：中文也用字符级 tokenizer 合理吗？
+作为学习版，合理，而且中文字符级通常会比英文字符级更自然。
+
+原因是：
+```text
+英文字符级：t / h / e 要先拼成 the，模型要先学拼写
+中文字符级：我 / 你 / 天 / 地 每个字本身已经带一些语义
+```
+
+所以换成中文语料后，即使仍然是字符级 tokenizer，输出也可能比英文字符级更像句子。但它仍然不是最科学的终点。
+
+更接近真实大模型的做法是 **BPE / subword tokenizer**：
+```text
+字符级：我 / 喜 / 欢 / 学 / 习 / 人 / 工 / 智 / 能
+BPE后：我 / 喜欢 / 学习 / 人工智能
+```
+
+BPE 的好处是：常见词语可以作为一个 token，模型不必每次从单字重新拼词；罕见词又可以拆成更小单位，不会彻底无法处理。这个会让句子更稳定，尤其是词语边界和长词组合更自然。
+
 ### Q：tokenizer 要用类包裹吗？
 **要**。因为它有状态（stoi/itos/vocab_size），且**训练和生成必须用同一个词表**。类把"状态+方法"打包，并保证一致性。
 - 用法：`tok = Tokenizer(text)`（实例化，自动调 `__init__`）→ `tok.encode("hi")`。
@@ -188,6 +256,85 @@ out = model.generate(start, max_new_tokens=300, temperature=0.8)
 | **batch_size** | 每步并行几条→速度；梯度是多少例子的平均→稳定性(越小越抖)；越大越吃内存 | **训练过程** |
 
 口诀：block_size 管能力，batch_size 管训练稳不稳。
+
+### Q：如何让 CPU 多个核心都跑起来？
+训练过程分两段：
+
+```text
+BPE tokenizer 预处理阶段
+PyTorch 模型训练阶段
+```
+
+这两段不一样。当前教学版 BPE 是纯 Python 写的，主要是单线程循环，所以它通常只会把一个 CPU 核心跑满。等看到：
+```text
+step 0: train loss ...
+```
+才说明进入了 PyTorch 模型训练阶段。
+
+PyTorch 训练阶段可以用多线程跑矩阵乘法。项目里可以加：
+```bash
+--num-threads 8
+```
+
+例如：
+```bash
+uv run python microLLM/train.py --data materials/AMC_scientific_articles_500K.txt --checkpoint microLLM/chinese_bpe_model.pt --tokenizer bpe --bpe-merges 500 --num-threads 8
+```
+
+`--num-threads 0` 或不写时，会自动使用系统能看到的逻辑核心数。启动时会打印：
+```text
+PyTorch CPU threads: intra_op=..., interop=...
+```
+
+注意：线程数不是越大越快。小模型的矩阵很小，多线程调度开销可能抵消收益。如果 CPU 有 16 个逻辑核心，可以试：
+```text
+--num-threads 4
+--num-threads 8
+--num-threads 16
+```
+看哪个每秒 step 更多。
+
+如果想让 BPE 预处理也真正多核，通常不继续手写 Python 版，而是换成 HuggingFace `tokenizers` 这类 Rust 实现，或者把 BPE 统计与合并逻辑重新设计成多进程版本。
+
+### Q：为什么大语料卡在 `BPE merge 1/500` 后面？
+因为教学版 BPE 的训练逻辑是：
+```text
+统计整篇文本里所有相邻 token 对
+→ 找最高频的一对
+→ 全文扫描，把这一对合并
+→ 重复 500 次
+```
+
+如果文本有 33,000,000 个字符，`--bpe-merges 500` 近似就是非常多次 Python 层面的全量扫描。它不是 PyTorch 矩阵计算，所以 `--num-threads` 帮不上太多，只会看到一个 CPU 核心忙很久。
+
+项目现在加了 `--bpe-train-chars`：
+```bash
+--bpe-train-chars 1000000
+```
+
+意思是：只用前 100 万字符学习 BPE merge 规则，但词表仍然覆盖完整训练文本里的所有字符。这样能保留 BPE 的学习效果，同时避免在预处理阶段耗太久。
+
+大语料建议先这样跑：
+```bash
+uv run python microLLM/train.py --data materials/AMC_scientific_articles_500K.txt --checkpoint microLLM/chinese_bpe_model.pt --tokenizer bpe --bpe-merges 300 --bpe-train-chars 500000
+```
+
+确认能进入：
+```text
+step 0: train loss ...
+```
+
+再逐步加大：
+```text
+--bpe-merges 500
+--bpe-train-chars 1000000
+```
+
+如果写：
+```bash
+--bpe-train-chars 0
+```
+就是强制用全文训练 BPE。这个更接近完整算法，但在当前纯 Python 教学版里会非常慢。
 
 ### Q：为什么 loss 在 2.4~2.6 之间跳，不平滑下降？
 每步 loss 是从一个**随机 batch** 算的，不同 batch 难度不同所以抖动。看整体趋势(4.6→2.4)而非单步。想看平滑曲线可定期在验证集上算平均 loss(estimate_loss)。

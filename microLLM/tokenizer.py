@@ -1,23 +1,231 @@
-# 将数据化为token
+from collections import Counter
+
 
 class Tokenizer:
-    # 1) 建词表：找出文本里出现过的所有不同字符，排序后固定下来
-    #set(text) 去重，sorted 让顺序稳定（每次跑结果一致）
-    def __init__(self, text: str):
-        #准备去重
+    # 字符级 tokenizer：每个不同字符都是一个 token。
+    name = "char"
+
+    def __init__(self, text: str, verbose: bool = True):
         self.chars = sorted(set(text))
-        self.vocab_size = len(self.chars)
+        self._build_maps(verbose=verbose)
 
-        #建立映射关系
-        self.stoi = {ch: i for i, ch in enumerate(self.chars)}
-        self.itos = {i: ch for i, ch in enumerate(self.chars)}
-        print("\nvocab_size（不同字符数）:", self.vocab_size)
-        print("所有字符:", "".join(self.chars))
-        
+    @classmethod
+    def from_chars(cls, chars: list[str], verbose: bool = True):
+        tokenizer = cls.__new__(cls)
+        tokenizer.chars = list(chars)
+        tokenizer._build_maps(verbose=verbose)
+        return tokenizer
 
-    # 2) encode：字符串 -> 数字列表 ；decode：数字列表 -> 字符串
+    @classmethod
+    def from_config(cls, config: dict, verbose: bool = True):
+        return cls.from_chars(config["chars"], verbose=verbose)
+
+    def _build_maps(self, verbose: bool = True):
+        self.vocab = list(self.chars)
+        self.vocab_size = len(self.vocab)
+        self.stoi = {token: i for i, token in enumerate(self.vocab)}
+        self.itos = {i: token for i, token in enumerate(self.vocab)}
+        if verbose:
+            print("\ntokenizer: char")
+            print("vocab_size（不同字符数）:", self.vocab_size)
+            print("所有字符:", "".join(self.chars))
+
+    def to_config(self):
+        return {
+            "type": self.name,
+            "chars": self.chars,
+        }
+
+    # encode：字符串 -> 数字列表；decode：数字列表 -> 字符串
     def encode(self, s: str):
         return [self.stoi[c] for c in s]
 
     def decode(self, nums: list[int]):
         return "".join(self.itos[i] for i in nums)
+
+
+class BPETokenizer:
+    # 教学版 BPE：从字符开始，反复合并最常见的相邻 token 对。
+    name = "bpe"
+
+    def __init__(
+        self,
+        text: str,
+        num_merges: int = 200,
+        min_frequency: int = 2,
+        vocab_text: str | None = None,
+        verbose: bool = True,
+    ):
+        if num_merges < 0:
+            raise ValueError("num_merges 必须大于等于 0。")
+        if min_frequency < 2:
+            raise ValueError("min_frequency 建议至少为 2，否则会合并只出现一次的片段。")
+
+        self.initial_chars = sorted(set(vocab_text if vocab_text is not None else text))
+        self.merges: list[tuple[str, str]] = []
+        tokens = tuple(text)
+
+        if verbose:
+            print("\ntokenizer: bpe")
+            print("开始训练 BPE tokenizer...")
+            print("原始字符数:", len(tokens))
+            print("初始字符种类数:", len(self.initial_chars))
+            print("计划 merge 数量:", num_merges, flush=True)
+
+        for merge_idx in range(num_merges):
+            stats = self._get_pair_stats(tokens)
+            if not stats:
+                break
+
+            best_pair, best_count = stats.most_common(1)[0]
+            if best_count < min_frequency:
+                break
+
+            self.merges.append(best_pair)
+            tokens = self._merge_pair(tokens, best_pair)
+            if verbose and (
+                merge_idx == 0
+                or (merge_idx + 1) % 50 == 0
+                or merge_idx + 1 == num_merges
+            ):
+                merged_token = "".join(best_pair)
+                print(
+                    f"BPE merge {merge_idx + 1}/{num_merges}: "
+                    f"freq={best_count}, token_len={len(tokens)}, merged={merged_token!r}",
+                    flush=True,
+                )
+
+        merged_tokens = ["".join(pair) for pair in self.merges]
+        self.vocab = sorted(set(self.initial_chars) | set(merged_tokens) | set(tokens))
+        self._build_maps(verbose=verbose)
+        self.merge_ranks = {pair: rank for rank, pair in enumerate(self.merges)}
+        self._cached_text = text
+        self._cached_ids = [self.stoi[token] for token in tokens]
+
+    @classmethod
+    def from_config(cls, config: dict, verbose: bool = True):
+        tokenizer = cls.__new__(cls)
+        tokenizer.initial_chars = list(config["initial_chars"])
+        tokenizer.merges = [tuple(pair) for pair in config["merges"]]
+        tokenizer.vocab = list(config["vocab"])
+        tokenizer._build_maps(verbose=verbose)
+        tokenizer.merge_ranks = {pair: rank for rank, pair in enumerate(tokenizer.merges)}
+        return tokenizer
+
+    @staticmethod
+    def _get_pair_stats(tokens: tuple[str, ...]):
+        return Counter(zip(tokens, tokens[1:]))
+
+    @staticmethod
+    def _merge_pair(tokens: tuple[str, ...], pair: tuple[str, str]):
+        merged_token = "".join(pair)
+        out = []
+        i = 0
+        while i < len(tokens):
+            if i < len(tokens) - 1 and (tokens[i], tokens[i + 1]) == pair:
+                out.append(merged_token)
+                i += 2
+            else:
+                out.append(tokens[i])
+                i += 1
+        return tuple(out)
+
+    def _build_maps(self, verbose: bool = True):
+        self.vocab_size = len(self.vocab)
+        self.stoi = {token: i for i, token in enumerate(self.vocab)}
+        self.itos = {i: token for i, token in enumerate(self.vocab)}
+
+        if verbose:
+            preview = " / ".join(self.vocab[:40])
+            print("初始字符数:", len(self.initial_chars))
+            print("merge 数量:", len(self.merges))
+            print("vocab_size:", self.vocab_size)
+            print("词表预览:", preview, flush=True)
+
+    def to_config(self):
+        return {
+            "type": self.name,
+            "initial_chars": self.initial_chars,
+            "merges": [list(pair) for pair in self.merges],
+            "vocab": self.vocab,
+        }
+
+    def encode(self, s: str):
+        if getattr(self, "_cached_text", None) == s:
+            return list(self._cached_ids)
+        return self._encode_chunks(s, show_progress=False)
+
+    def encode_with_progress(self, s: str, chunk_size: int = 4096):
+        if getattr(self, "_cached_text", None) == s:
+            print("复用 BPE 训练阶段缓存的 token id。", flush=True)
+            return list(self._cached_ids)
+        return self._encode_chunks(s, chunk_size=chunk_size, show_progress=True)
+
+    def _encode_chunks(self, s: str, chunk_size: int = 4096, show_progress: bool = False):
+        ids = []
+        total = len(s)
+        for start in range(0, total, chunk_size):
+            piece = s[start:start + chunk_size]
+            ids.extend(self._encode_piece(piece))
+            if show_progress and (
+                start == 0
+                or start + chunk_size >= total
+                or (start // chunk_size + 1) % 500 == 0
+            ):
+                done = min(start + chunk_size, total)
+                print(f"BPE encode: {done}/{total} chars", flush=True)
+        return ids
+
+    def _encode_piece(self, piece: str):
+        tokens = list(piece)
+        if not tokens:
+            return []
+
+        while len(tokens) >= 2:
+            best_rank = None
+            best_pair = None
+            for pair in zip(tokens, tokens[1:]):
+                rank = self.merge_ranks.get(pair)
+                if rank is not None and (best_rank is None or rank < best_rank):
+                    best_rank = rank
+                    best_pair = pair
+
+            if best_pair is None:
+                break
+
+            tokens = list(self._merge_pair(tuple(tokens), best_pair))
+
+        return [self.stoi[token] for token in tokens]
+
+    def decode(self, nums: list[int]):
+        return "".join(self.itos[i] for i in nums)
+
+
+def build_tokenizer(
+    text: str,
+    tokenizer_type: str = "char",
+    bpe_merges: int = 200,
+    bpe_min_frequency: int = 2,
+    vocab_text: str | None = None,
+    verbose: bool = True,
+):
+    if tokenizer_type == "char":
+        return Tokenizer(text, verbose=verbose)
+    if tokenizer_type == "bpe":
+        return BPETokenizer(
+            text,
+            num_merges=bpe_merges,
+            min_frequency=bpe_min_frequency,
+            vocab_text=vocab_text,
+            verbose=verbose,
+        )
+    raise ValueError(f"未知 tokenizer 类型: {tokenizer_type}")
+
+
+def tokenizer_from_config(config: dict, verbose: bool = True):
+    tokenizer_type = config["type"]
+    if tokenizer_type == "char":
+        return Tokenizer.from_config(config, verbose=verbose)
+    if tokenizer_type == "bpe":
+        return BPETokenizer.from_config(config, verbose=verbose)
+    raise ValueError(f"未知 tokenizer 类型: {tokenizer_type}")

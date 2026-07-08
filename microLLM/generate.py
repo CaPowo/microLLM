@@ -5,7 +5,7 @@ import torch
 
 from data import read_file
 from model import Model
-from tokenizer import Tokenizer
+from tokenizer import Tokenizer, tokenizer_from_config
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -17,7 +17,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Load best checkpoint and generate text.")
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT_PATH)
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA_PATH)
-    parser.add_argument("--start", type=str, default="\n")
+    parser.add_argument("--start", type=str, default="")
     parser.add_argument("--max-new-tokens", type=int, default=500)
     parser.add_argument("--temperature", type=float, default=0.8)
     return parser.parse_args()
@@ -49,18 +49,22 @@ def main():
             "请先运行: uv run python microLLM/train.py"
         )
 
-    text = read_file(str(args.data))
-    tok = Tokenizer(text)
-
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    if checkpoint["vocab_size"] != tok.vocab_size:
-        raise ValueError(
-            f"checkpoint vocab_size={checkpoint['vocab_size']}，"
-            f"但当前 tokenizer vocab_size={tok.vocab_size}。请确认训练和生成使用同一份数据。"
-        )
+    if "tokenizer" in checkpoint:
+        tok = tokenizer_from_config(checkpoint["tokenizer"])
+    elif "chars" in checkpoint and checkpoint["chars"] is not None:
+        tok = Tokenizer.from_chars(checkpoint["chars"])
+    else:
+        text = read_file(str(args.data))
+        tok = Tokenizer(text)
+        if checkpoint["vocab_size"] != tok.vocab_size:
+            raise ValueError(
+                f"checkpoint vocab_size={checkpoint['vocab_size']}，"
+                f"但当前 tokenizer vocab_size={tok.vocab_size}。请确认训练和生成使用同一份数据。"
+            )
 
     try:
-        start_ids = tok.encode(args.start)
+        start_ids = tok.encode(args.start) if args.start else [0]
     except KeyError as exc:
         raise ValueError(f"起始文本里有训练词表不存在的字符: {exc}") from exc
 
