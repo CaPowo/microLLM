@@ -40,7 +40,7 @@ class Head(nn.Module):
         return out
     
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd: int, num_heads: int, block_size: int):
+    def __init__(self, n_embd: int, num_heads: int, block_size: int, dropout: float):
         super().__init__()
         head_size = n_embd // num_heads
         self.heads = nn.ModuleList([
@@ -48,8 +48,10 @@ class MultiHeadAttention(nn.Module):
             for _ in range(num_heads)
         ]) #起循环 建立多注意力头
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
         out = self.proj(out)
+        out = self.dropout(out)
         return out

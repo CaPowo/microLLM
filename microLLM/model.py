@@ -6,7 +6,7 @@ from block import Block
 
 class Model(nn.Module):
     # 制作空白的“分数表”
-    def __init__(self,vocab_size:int,n_embd: int, block_size: int, num_heads: int, n_layer: int):
+    def __init__(self,vocab_size:int,n_embd: int, block_size: int, num_heads: int, n_layer: int, dropout: float):
         super().__init__()
         assert n_embd % num_heads == 0
 
@@ -20,7 +20,7 @@ class Model(nn.Module):
 
         # 注意力头（这里引入多注意力头 num_heads= 决定头的数量）
         self.blocks = nn.Sequential(*[
-            Block(n_embd, num_heads, block_size)
+            Block(n_embd, num_heads, block_size, dropout)
             for _ in range(n_layer)
         ])
         
@@ -70,7 +70,7 @@ class Model(nn.Module):
         return logits,loss
     
     @torch.no_grad() #生成时不需要训练，直接关闭求导
-    def generate(self, idx:torch.Tensor, max_new_tokens: int, temperature: float):
+    def generate(self, idx:torch.Tensor, max_new_tokens: int, temperature: float = 1.0):
         '''
         0.7 更稳但可能重复
         0.8 推荐先试

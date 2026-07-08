@@ -594,7 +594,73 @@ ReLU(z) = max(0, z)
 
 ---
 
-## 十、调试经验
+## 十、当前项目已经具备哪些 Transformer 部件
+
+### Q：当前项目已经具备哪些 Transformer 部件？
+到目前为止，项目已经实现了一个**字符级 decoder-only GPT 风格 Transformer** 的主体。它不是原论文里包含 encoder、decoder、cross-attention 的完整机器翻译 Transformer，而是更接近 GPT 的"只看上文、预测下一个 token"模型。
+
+当前已经具备：
+
+| 部件 | 做什么 | 在代码里 |
+|---|---|---|
+| 字符级 Tokenizer | 把文本字符转成 token id，再把 token id 转回字符 | `tokenizer.py` |
+| 数据批次 | 从长文本里随机切出 `(x, y)`，训练"看前文猜下一个" | `data.py` |
+| Token Embedding | 把字符编号变成 `n_embd` 维向量 | `Model.token_embedding_table` |
+| Position Embedding | 给每个位置加入顺序信息 | `Model.position_embedding_table` |
+| Causal Self-Attention | 每个位置只能看自己和左边上文，不能偷看未来 | `Head` |
+| Q/K/V | 让每个 token 形成"我想找什么 / 我能提供什么 / 我实际给什么"三种视角 | `self.query/key/value` |
+| Multi-Head Attention | 多个注意力头并行看不同关系，再拼接融合 | `MultiHeadAttention` |
+| Output Projection | 多头拼接后再用线性层混合各头信息 | `self.proj` |
+| FeedForward / FFN | 注意力交流信息之后，对每个 token 的内部向量单独加工 | `FeedForward` |
+| Residual Connection | 把模块输出加回原输入，保留旧信息，也让梯度更容易传 | `x = x + ...` |
+| LayerNorm | 每层前归一化内部向量，让深层训练更稳定 | `nn.LayerNorm` |
+| Transformer Block | 把 LayerNorm、Attention、Residual、FFN 组合成可堆叠模块 | `Block` |
+| 多层堆叠 | 多个 Block 连续加工，使模型多轮理解上下文 | `nn.Sequential(*[Block(...)])` |
+| Final LayerNorm | 输出前再做一次归一化 | `self.ln_f` |
+| LM Head | 把内部向量翻译成 vocab 里每个字符的 logits | `self.lm_head` |
+| Autoregressive Generate | 一次预测一个新字符，再把它接回上下文继续生成 | `Model.generate` |
+| Temperature | 生成时调采样随机性，低温更稳，高温更发散 | `logits / temperature` |
+| Dropout | 训练时随机遮掉部分通道，减少过拟合 | `nn.Dropout` |
+| Train/Val Loss | 用训练集和验证集同时观察学习与泛化 | `estimate_loss()` |
+| Best Checkpoint | 保存验证集 loss 最低的一版模型 | `best_model.pt` |
+
+一句话总结：**Transformer 的核心主干已经完成了；后面主要是在提升生成质量和训练工程化。**
+
+还没有做、但后续可以继续加的东西：
+
+| 后续项 | 为什么有用 |
+|---|---|
+| top-k / top-p sampling | 生成时过滤掉太离谱的低概率字符，让文本更稳 |
+| 学习率调度 / warmup | 让训练前期更稳、后期更细 |
+| weight decay / gradient clipping | 进一步稳定训练，降低参数发散风险 |
+| GPU/device 支持 | 模型变大后训练更快 |
+| BPE/subword tokenizer | 从字符级升级到更接近真实 LLM 的 token 粒度 |
+| 统一 config | 不用在多个文件里手动同步超参数 |
+| 更完整的 checkpoint | 同时保存 tokenizer/vocab/config，加载更可靠 |
+
+### Q：所以 Transformer 已经完成了吗？
+如果目标是"从零理解 GPT 类 Transformer 的主体结构"，可以认为已经完成。因为已经有：
+```text
+embedding
+→ 多层 [LayerNorm → Multi-Head Causal Attention → Residual
+       → LayerNorm → FFN → Residual]
+→ final LayerNorm
+→ lm_head
+→ 自回归生成
+```
+
+但如果目标是"做一个像现代 LLM 那样强的系统"，还远没有完成。真实 LLM 还需要更大的模型、更大的数据、更好的 tokenizer、更复杂的训练策略、更强的采样方法、GPU/分布式训练、评测体系等。
+
+所以更准确的说法是：
+```text
+Transformer 主体：完成
+教学版 GPT：完成第一版
+工业级 LLM：只是刚理解核心原理
+```
+
+---
+
+## 十一、调试经验
 
 ### Q：4.9TB 内存报错怎么回事？
 不是真缺内存，是某维度填错把张量造成天文数字。`4976415100944÷4≈1115394²`(=文本长度²)，说明 `nn.Embedding` 尺寸被误填成 `len(data)` 而非 `vocab_size`。**经验：离谱大小的报错先把数字反推，常能直接定位填错的维度。**

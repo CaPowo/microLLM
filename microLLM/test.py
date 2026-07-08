@@ -12,7 +12,7 @@ train_data, val_data = train_val_split(data)
 
 xb, yb = get_batch(train_data, block_size=8, batch_size=4)
 
-model = Model(tok.vocab_size, 64, 8, 4)
+model = Model(vocab_size=tok.vocab_size, n_embd=64, block_size=8, num_heads=4, n_layer=2, dropout=0.2)
 logits, loss = model(xb, yb)
 print(data)
 print(logits.shape)   # torch.Size([4, 8, 65])

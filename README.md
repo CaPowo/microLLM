@@ -30,7 +30,7 @@
 train / val ──get_batch──▶ 一批 (x, y)   # y 是 x 右移一位 = "每个位置的下一个字符"
   │  model(x, y)
   ▼
-Model: token+position embedding → Multi-Head Attention → FFN → logits ──cross_entropy(与y比)──▶ loss
+Model: token+position embedding → 多层 Transformer Block → logits ──cross_entropy(与y比)──▶ loss
   │  loss.backward() + optimizer.step()   # 反向传播 + 更新参数
   ▼
 重复几千步，loss 下降，模型学会规律
@@ -49,10 +49,11 @@ LearnLLM/
 │   ├── tokenizer.py    # Tokenizer 类：建词表 + encode/decode（字符↔数字）
 │   ├── data.py         # read_file / make_data_tensor / train_val_split / get_batch
 │   ├── attention.py    # Head / MultiHeadAttention：Q/K/V → 因果自注意力 → 多头拼接
-│   ├── model.py        # Model：token+position embedding → multi-head attention → FFN → lm_head
-│   ├── train.py        # 训练入口：装配 → 优化器 → 训练循环 → 生成对比
+│   ├── block.py        # Transformer Block：LayerNorm + 残差 + Multi-Head Attention + FFN
+│   ├── model.py        # Model：embedding → 多层 Block → final LayerNorm → lm_head
+│   ├── train.py        # 训练入口：训练循环 + train/val loss + best checkpoint
 │   ├── test.py         # 临时测试脚本（验证形状、loss、生成）
-│   ├── generate.py     # （预留）训练后加载模型生成文本的入口脚本
+│   ├── generate.py     # 加载 best_model.pt 并生成文本的入口脚本
 │   └── tiny_shakespeare.txt  # 训练数据
 ├── docs/
 │   └── QA.md           # 学习过程中所有疑问的整理（强烈建议复习）
@@ -68,9 +69,12 @@ LearnLLM/
 ```bash
 # 训练并在结束后生成一段文本
 uv run python microLLM/train.py
+
+# 训练后，加载 best checkpoint 单独生成文本
+uv run python microLLM/generate.py --max-new-tokens 500 --temperature 0.8
 ```
 
-训练初始 loss 通常在 4.x 左右。当前的 Multi-Head Attention + FFN 版本，训练后 loss 已能从约 2.2 继续下降到约 1.8，生成文本明显更像英文文章/剧本文本。
+训练初始 loss 通常在 4.x 左右。当前的多层 Transformer Block 版本，验证集 loss 已观察到约 1.6 左右，生成文本已经能学到剧本格式、换行、角色名和局部英文结构。
 
 ---
 
@@ -90,6 +94,10 @@ uv run python microLLM/train.py
 | n_embd | 每个 token 在模型内部的向量宽度 | `Model(..., n_embd=32)` |
 | attention | 让每个位置按权重读取上文信息 | `Head` / `MultiHeadAttention` |
 | FFN | 注意力之后，对每个位置的向量单独加工 | `FeedForward` |
+| residual | 把模块输出加回原输入，保留旧信息并稳定训练 | `Block.forward` |
+| LayerNorm | 归一化每个 token 的内部向量，让深层训练更稳 | `nn.LayerNorm` |
+| dropout | 训练时随机遮掉部分通道，降低过拟合 | `nn.Dropout` |
+| checkpoint | 保存验证集 loss 最好的模型参数 | `best_model.pt` |
 
 详细的原理问答见 [docs/QA.md](docs/QA.md)。
 
@@ -105,17 +113,30 @@ uv run python microLLM/train.py
 - [x] **位置编码 + 迷你 Transformer**：token+position embedding → sa_head → lm_head（loss ≈ 2.3，文本现剧本结构）
 - [x] **Multi-Head Attention**：多个头并行看不同关系，再拼接 + projection 融合
 - [x] **Feed-Forward（FFN）**：注意力后每个位置单独"消化"（loss 已观察到 ≈1.8）
-- [ ] **残差连接 + LayerNorm**：稳定深层训练 ← 下一步
-- [ ] **堆叠多个 Block + 调大规模**：loss 可降到 ≈ 1.5，文本更连贯
+- [x] **残差连接 + LayerNorm**：稳定深层训练
+- [x] **堆叠多个 Block + 调大规模**：loss 可降到 ≈1.5~1.6，文本更连贯
+- [x] **train/val loss + best checkpoint**：用验证集挑选最好模型，而不是盲用最后一步
+- [x] **Dropout**：降低训练集记忆过强带来的过拟合
+- [x] **正式生成脚本**：`generate.py` 加载 `best_model.pt` 生成文本
+- [ ] **采样增强**：top-k / top-p，让生成更稳
+- [ ] **工程化配置**：统一 config、设备选择（CPU/GPU）、更完整的 checkpoint 元信息
 
 ---
 
-## 当前进展：Multi-Head Attention + FFN
+## 当前进展：Transformer 主体已完成
 
-- **Bigram** 只看前一个字符，loss 到 ≈2.4 就到头了。
-- 加上**自注意力 + 位置编码**后，每个位置能"回看全部上文并按相关性加权利用"，loss 降到 ≈2.3，生成文本开始出现剧本结构和真单词碎片。
-- 加上**多头注意力**后，多个 Head 可以并行关注不同关系，再通过 projection 融合，模型不再只靠一个注意力视角读上下文。
-- 加上**FFN**后，每个位置在拿到上下文信息后，还能对自己的 `n_embd` 维向量再做一轮可学习加工。当前训练中 loss 已从约 2.2 下降到约 1.8，输出已经明显像英文文章/剧本文本。
-- 下一步是把注意力和 FFN 包进更标准的 Transformer Block：加入**残差连接 + LayerNorm**，让训练更稳定，后续才能自然堆叠多个 Block。
+这个项目现在已经具备一个**字符级 decoder-only GPT 风格 Transformer** 的主体结构：
+
+- token embedding + position embedding
+- causal self-attention（因果掩码，不偷看未来）
+- multi-head attention + output projection
+- feed-forward network（FFN）
+- residual connection + LayerNorm
+- 多层 Transformer Block 堆叠
+- final LayerNorm + lm_head
+- 自回归 generate
+- train/val loss 评估、best val loss checkpoint、dropout、temperature 采样
+
+也就是说，从学习 Transformer 主干原理的角度看，主体已经完成。接下来不是继续"补 Transformer 核心积木"，而是进入**生成质量优化**和**训练脚本工程化**：比如 top-k/top-p 采样、学习率调度、GPU 支持、BPE tokenizer、更大数据和更大的模型。
 
 > 详细的逐题原理见 [docs/QA.md](docs/QA.md)，已覆盖 tokenization、张量、神经网络与梯度下降、预测机制、Q/K/V 自注意力全流程、多头注意力、FFN、迷你 Transformer 结构、以及调试经验。
