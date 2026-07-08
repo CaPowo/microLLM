@@ -11,13 +11,14 @@ text = read_file("C:\\Users\\15589\\Desktop\\LearnLLM\\microLLM\\tiny_shakespear
 tok = Tokenizer(text) #数据token化
 data = make_data_tensor(text,tok) #构造一维张量
 train, val = train_val_split(data) #分类 训练和验证集
-model = Model(n_embd=32,block_size=8,vocab_size=tok.vocab_size)  #创建空白表格
 
 #2. 超参数
 batch_size = 32  #每一批的序列数
-block_size = 8  #每一个序列里面的token数量
+block_size = 16  #每一个序列里面的token数量
 learning_rate = 1e-2    #学习率
 num_steps = 10000   #迭代次数
+
+model = Model(n_embd=32,block_size=block_size,vocab_size=tok.vocab_size,num_heads=4)  #创建空白表格
 
 #3. 优化器
 """

@@ -30,7 +30,7 @@
 train / val ──get_batch──▶ 一批 (x, y)   # y 是 x 右移一位 = "每个位置的下一个字符"
   │  model(x, y)
   ▼
-Model: Embedding 查表 → logits(每个位置对65个字符的打分) ──cross_entropy(与y比)──▶ loss
+Model: token+position embedding → Multi-Head Attention → FFN → logits ──cross_entropy(与y比)──▶ loss
   │  loss.backward() + optimizer.step()   # 反向传播 + 更新参数
   ▼
 重复几千步，loss 下降，模型学会规律
@@ -48,8 +48,8 @@ LearnLLM/
 ├── microLLM/
 │   ├── tokenizer.py    # Tokenizer 类：建词表 + encode/decode（字符↔数字）
 │   ├── data.py         # read_file / make_data_tensor / train_val_split / get_batch
-│   ├── attention.py    # Head 类：单头自注意力（Q/K/V → 缩放点积 → 因果掩码 → softmax → @V）
-│   ├── model.py        # Model：迷你 Transformer（token+position embedding → sa_head → lm_head）
+│   ├── attention.py    # Head / MultiHeadAttention：Q/K/V → 因果自注意力 → 多头拼接
+│   ├── model.py        # Model：token+position embedding → multi-head attention → FFN → lm_head
 │   ├── train.py        # 训练入口：装配 → 优化器 → 训练循环 → 生成对比
 │   ├── test.py         # 临时测试脚本（验证形状、loss、生成）
 │   ├── generate.py     # （预留）训练后加载模型生成文本的入口脚本
@@ -70,7 +70,7 @@ LearnLLM/
 uv run python microLLM/train.py
 ```
 
-训练时会看到 loss 从约 4.6 下降并稳定在约 2.4（这是 Bigram 的天花板）。
+训练初始 loss 通常在 4.x 左右。当前的 Multi-Head Attention + FFN 版本，训练后 loss 已能从约 2.2 继续下降到约 1.8，生成文本明显更像英文文章/剧本文本。
 
 ---
 
@@ -87,6 +87,9 @@ uv run python microLLM/train.py
 | 梯度下降 | 靠 loss 指方向，一步步调整参数 | `loss.backward()` + `optimizer.step()` |
 | block_size | 上下文长度（模型能看多远）→ **模型能力** | 超参数 |
 | batch_size | 一步并行几条序列 → **训练稳定性/速度** | 超参数 |
+| n_embd | 每个 token 在模型内部的向量宽度 | `Model(..., n_embd=32)` |
+| attention | 让每个位置按权重读取上文信息 | `Head` / `MultiHeadAttention` |
+| FFN | 注意力之后，对每个位置的向量单独加工 | `FeedForward` |
 
 详细的原理问答见 [docs/QA.md](docs/QA.md)。
 
@@ -100,17 +103,19 @@ uv run python microLLM/train.py
 - [x] **Bigram 模型**：Embedding → logits → loss → 训练 → 生成（loss ≈ 2.4）
 - [x] **单头自注意力**：Q/K/V → 缩放点积 → 因果掩码 → softmax → 加权混合（attention.py）
 - [x] **位置编码 + 迷你 Transformer**：token+position embedding → sa_head → lm_head（loss ≈ 2.3，文本现剧本结构）
-- [ ] **Multi-Head Attention**：多个头并行看不同关系，再合并 ← 下一步
-- [ ] **Feed-Forward（FFN）**：注意力后每个位置单独"消化"
-- [ ] **残差连接 + LayerNorm**：稳定深层训练
+- [x] **Multi-Head Attention**：多个头并行看不同关系，再拼接 + projection 融合
+- [x] **Feed-Forward（FFN）**：注意力后每个位置单独"消化"（loss 已观察到 ≈1.8）
+- [ ] **残差连接 + LayerNorm**：稳定深层训练 ← 下一步
 - [ ] **堆叠多个 Block + 调大规模**：loss 可降到 ≈ 1.5，文本更连贯
 
 ---
 
-## 当前进展：从 Bigram 到迷你 Transformer
+## 当前进展：Multi-Head Attention + FFN
 
 - **Bigram** 只看前一个字符，loss 到 ≈2.4 就到头了。
 - 加上**自注意力 + 位置编码**后，每个位置能"回看全部上文并按相关性加权利用"，loss 降到 ≈2.3，生成文本开始出现剧本结构和真单词碎片。
-- 提升仍有限，因为目前是**单头、单层、block_size 仅 8**。后续加多头注意力、FFN、残差+LayerNorm、堆叠多层并调大规模，loss 可降到 ≈1.5，文本更连贯。
+- 加上**多头注意力**后，多个 Head 可以并行关注不同关系，再通过 projection 融合，模型不再只靠一个注意力视角读上下文。
+- 加上**FFN**后，每个位置在拿到上下文信息后，还能对自己的 `n_embd` 维向量再做一轮可学习加工。当前训练中 loss 已从约 2.2 下降到约 1.8，输出已经明显像英文文章/剧本文本。
+- 下一步是把注意力和 FFN 包进更标准的 Transformer Block：加入**残差连接 + LayerNorm**，让训练更稳定，后续才能自然堆叠多个 Block。
 
-> 详细的逐题原理见 [docs/QA.md](docs/QA.md)，已覆盖 tokenization、张量、神经网络与梯度下降、预测机制、Q/K/V 自注意力全流程、迷你 Transformer 结构、以及调试经验。
+> 详细的逐题原理见 [docs/QA.md](docs/QA.md)，已覆盖 tokenization、张量、神经网络与梯度下降、预测机制、Q/K/V 自注意力全流程、多头注意力、FFN、迷你 Transformer 结构、以及调试经验。

@@ -2,13 +2,26 @@
 import torch
 import torch.nn as nn
 from  torch.nn import functional as F
-from attention import Head
+from attention import MultiHeadAttention
 
+class FeedForward(nn.Module):  #构造FFN
+    def __init__(self, n_embd: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+        )
+
+    def forward(self, x: torch.Tensor):
+        return self.net(x)
 
 class Model(nn.Module):
     # 制作空白的“分数表”
-    def __init__(self,vocab_size:int,n_embd: int, block_size: int):
+    def __init__(self,vocab_size:int,n_embd: int, block_size: int, num_heads: int):
         super().__init__()
+        assert n_embd % num_heads == 0
+
         self.block_size = block_size
 
         # token：编号 → n_embd 维含义向量
@@ -17,24 +30,30 @@ class Model(nn.Module):
         # 位置：位置 → n_embd 维位置向量
         self.position_embedding_table = nn.Embedding(block_size,n_embd)
 
-        # 注意力头（单头先用 head_size = n_embd）
-        self.sa_head = Head(n_embd, n_embd, block_size)
-        # 输出层：n_embd → vocab_size 个分数
+        # 注意力头（这里引入多注意力头 num_heads= 决定头的数量）
+        self.sa_head = MultiHeadAttention(n_embd, num_heads=num_heads, block_size=block_size)        # 输出层：n_embd → vocab_size 个分数
+        
+        self.ffn = FeedForward(n_embd)
+
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
 
     # 预测
     def forward(self, idx:torch.Tensor, targets:torch.Tensor=None):
         B, T = idx.shape
+        if T > self.block_size:
+            raise ValueError(f"输入序列长度 T={T} 超过模型最大 block_size={self.block_size}，请同步修改训练采样长度和 Model(...) 里的 block_size。")
 
         #token 含义向量
         tok_emb = self.token_embedding_table(idx)
         #位置向量
-        pos_emb = self.position_embedding_table(torch.arange(T))
+        pos_emb = self.position_embedding_table(torch.arange(T, device=idx.device))
         #相加
         x = tok_emb + pos_emb
 
         x = self.sa_head(x)
+
+        x = self.ffn(x)
 
         logits = self.lm_head(x)
 

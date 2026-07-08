@@ -38,3 +38,18 @@ class Head(nn.Module):
         # ⑥ 加权混合 V
         out = wei @ v       
         return out
+    
+class MultiHeadAttention(nn.Module):
+    def __init__(self, n_embd: int, num_heads: int, block_size: int):
+        super().__init__()
+        head_size = n_embd // num_heads
+        self.heads = nn.ModuleList([
+            Head(n_embd, head_size, block_size)
+            for _ in range(num_heads)
+        ]) #起循环 建立多注意力头
+        self.proj = nn.Linear(n_embd, n_embd)
+
+    def forward(self, x: torch.Tensor):
+        out = torch.cat([head(x) for head in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
