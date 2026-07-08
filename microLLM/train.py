@@ -14,11 +14,15 @@ train, val = train_val_split(data) #分类 训练和验证集
 
 #2. 超参数
 batch_size = 32  #每一批的序列数
-block_size = 16  #每一个序列里面的token数量
-learning_rate = 1e-2    #学习率
-num_steps = 10000   #迭代次数
+block_size = 64  #每一个序列里面的token数量
+n_embd = 64
+n_layer = 4
+num_heads = 4
+learning_rate = 1e-3    #学习率
+num_steps = 20000   #迭代次数
 
-model = Model(n_embd=32,block_size=block_size,vocab_size=tok.vocab_size,num_heads=4)  #创建空白表格
+
+model = Model(n_embd=n_embd,block_size=block_size,vocab_size=tok.vocab_size,num_heads=num_heads, n_layer=n_layer)  #创建空白表格
 
 #3. 优化器
 """
@@ -51,10 +55,32 @@ for i in range(num_steps):
     #按照梯度更新参数
     optimizer.step()
 
-    if i % 500 == 0:
-        print(f"step {i}: loss {loss.item():.4f}")
+    eval_interval = 500
+    eval_iters = 50
+
+    @torch.no_grad()
+    def estimate_loss():
+        out = {}
+        model.eval()
+        for split, data_src in [("train", train), ("val", val)]:
+            losses = torch.zeros(eval_iters)
+            for k in range(eval_iters):
+                xb, yb = get_batch(data_src, block_size, batch_size)
+                _, loss = model(xb, yb)
+                losses[k] = loss.item()
+            out[split] = losses.mean().item()
+        model.train()
+        return out
+    '''
+    train 降，val 也降：真进步
+    train 降，val 不降：开始过拟合
+    '''
+
+    if i % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
 
 start = torch.zeros((1, 1), dtype=torch.long)
-out = model.generate(start, max_new_tokens=300)
+out = model.generate(start, max_new_tokens=300, temperature=0.8)
 print(tok.decode(out[0].tolist()))

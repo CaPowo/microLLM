@@ -141,6 +141,41 @@ logits 形状 `(B,T,C)`：**B**=Batch(几条序列)、**T**=Time(每条几个位
 直接选最高分(argmax)会让生成**死板、重复、卡循环**（同输入永远同输出）。
 **按概率采样**：高概率字更常被选，低概率偶尔出现 → 文本更自然有变化。（进阶的 `temperature` 就是调这个随机性大小。）
 
+### Q：生成时的 temperature 是什么？代码里怎么加？
+`temperature` 是生成阶段控制随机性的旋钮，只影响**怎么采样**，不改变模型参数。
+- `temperature < 1`：更保守，假词更少，但可能重复。
+- `temperature = 1`：默认随机性。
+- `temperature > 1`：更发散，更有变化，但更容易胡编。
+
+更具体地说，模型先给每个字符输出一组分数 logits，然后 softmax 把分数变成概率。temperature 做的是在 softmax 前缩放分数：
+```python
+logits = logits / temperature
+```
+如果 `temperature=0.5`，分数差距会被拉大，高分字符更容易被选；如果 `temperature=1.5`，分数差距会被压小，低分字符也更容易冒出来。
+所以它限制输出质量的方式不是"改模型"，而是**改变抽样概率分布的尖锐程度**：
+```text
+低 temperature：更像选最有把握的字，稳定但可能重复
+高 temperature：允许更多低概率字，丰富但更容易胡编
+```
+
+代码上是在最后一个位置的 logits 后面除一下：
+```python
+def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0):
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -self.block_size:]
+        logits, loss = self(idx_cond)
+        logits = logits[:, -1, :]
+        logits = logits / temperature
+        probs = F.softmax(logits, dim=-1)
+        next_id = torch.multinomial(probs, 1)
+        idx = torch.cat((idx, next_id), dim=1)
+    return idx
+```
+训练结束生成时可先试：
+```python
+out = model.generate(start, max_new_tokens=300, temperature=0.8)
+```
+
 ---
 
 ## 六、超参数与训练
@@ -157,6 +192,24 @@ logits 形状 `(B,T,C)`：**B**=Batch(几条序列)、**T**=Time(每条几个位
 ### Q：为什么 loss 在 2.4~2.6 之间跳，不平滑下降？
 每步 loss 是从一个**随机 batch** 算的，不同 batch 难度不同所以抖动。看整体趋势(4.6→2.4)而非单步。想看平滑曲线可定期在验证集上算平均 loss(estimate_loss)。
 
+### Q：学习率（learning_rate）是什么？
+学习率控制每次参数更新时"迈多大一步"。
+训练时的大体公式是：
+```text
+新参数 = 旧参数 - learning_rate × 梯度
+```
+如果学习率太大，参数一步迈太猛，loss 容易抖动甚至越过好位置；如果学习率太小，训练会更稳但学得慢。
+
+项目里小模型用 `1e-2` 还能跑；模型变深、变宽后，通常要降到：
+```python
+learning_rate = 1e-3
+```
+甚至：
+```python
+learning_rate = 3e-4
+```
+这不是改变模型结构，而是改变优化器每一步更新参数的力度。
+
 ### Q：为什么停在 2.4 不再降？
 **Bigram 的天花板**——它只看前1个字符，信息太少。
 对照：随机瞎猜 ln(65)≈4.17 → Bigram≈2.4 → Transformer≈1.5（loss 越低预测越准）。
@@ -164,6 +217,158 @@ logits 形状 `(B,T,C)`：**B**=Batch(几条序列)、**T**=Time(每条几个位
 ### Q：那个 4.9TB 内存报错是怎么回事？
 不是真缺内存，是某维度填错把张量造成天文数字。`4976415100944 ÷ 4 ≈ 1115394²`，而 1115394 是文本长度——说明 `nn.Embedding` 尺寸被误填成 `len(data)` 而非 `vocab_size(65)`。修复：`Model(tok.vocab_size)`。
 **经验**：离谱大小的报错，先把数字反推，往往直接指出哪个维度填错。
+
+### Q：为什么要加 `estimate_loss()`？怎么落到代码里？
+训练循环里打印的单步 loss 来自一个随机 batch，会抖。`estimate_loss()` 是定期在 train/val 上各抽多批求平均，判断模型到底是在泛化变好，还是只是在背训练集。
+
+放在创建 optimizer 后、训练循环前：
+```python
+eval_interval = 500
+eval_iters = 50
+
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split, data_src in [("train", train), ("val", val)]:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            xb, yb = get_batch(data_src, block_size, batch_size)
+            _, loss = model(xb, yb)
+            losses[k] = loss.item()
+        out[split] = losses.mean().item()
+    model.train()
+    return out
+```
+
+训练循环里改成：
+```python
+if i % eval_interval == 0:
+    losses = estimate_loss()
+    print(f"step {i}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+```
+
+判断方式：
+```text
+train loss 下降，val loss 也下降：真进步
+train loss 下降，val loss 不降或上升：可能过拟合
+```
+
+### Q：best val loss 是什么？是不是生成时用最好的那版模型？
+是的。`best val loss` 指训练过程中验证集 loss 最低的那一步。生成时通常不一定用最后一步模型，而是用**验证集表现最好**的那版模型。
+
+例如：
+```text
+step 18000: val loss 1.5963
+step 19500: val loss 1.6052
+```
+虽然 19500 步的 train loss 可能更低，但 18000 步的 val loss 更好，说明它对没见过的数据泛化更好，更适合作为最终生成模型。
+
+保存逻辑：
+```python
+best_val_loss = float("inf")
+
+if losses["val"] < best_val_loss:
+    best_val_loss = losses["val"]
+    torch.save(model.state_dict(), "best_model.pt")
+```
+
+生成前加载：
+```python
+model.load_state_dict(torch.load("best_model.pt"))
+model.eval()
+```
+
+一句话：**训练时挑 val loss 最低的模型，生成时用它。**
+
+### Q：现在 loss 到 1.5 左右但还会造词，下一步超参数怎么调？
+当前已经有多个 Block、更大的 `block_size` 和 `n_embd`，说明模型开始从"像英文结构"进入"局部语法更像"。下一步建议先让训练更可观测、更稳定：
+```python
+batch_size = 32
+block_size = 64
+n_embd = 64
+num_heads = 4
+n_layer = 4
+learning_rate = 1e-3
+num_steps = 20000
+```
+
+原因：
+- `block_size` 更大：能看更长上下文，句子更容易连贯。
+- `n_layer` 更多：多轮加工，能学更复杂的词形/句法。
+- `learning_rate` 从 `1e-2` 降到 `1e-3`：模型变大后步子太大容易抖。
+- `num_steps` 增加：更大的模型需要更久训练，但要配合 `val loss` 看是否值得继续。
+
+### Q：多层 Block 不想写死 3 层，怎么参数化？
+在 `Model.__init__` 增加 `n_layer`：
+```python
+def __init__(self, vocab_size: int, n_embd: int, block_size: int, num_heads: int, n_layer: int):
+```
+
+把写死的三层：
+```python
+self.blocks = nn.Sequential(
+    Block(n_embd, num_heads, block_size),
+    Block(n_embd, num_heads, block_size),
+    Block(n_embd, num_heads, block_size),
+)
+```
+改成：
+```python
+self.blocks = nn.Sequential(*[
+    Block(n_embd, num_heads, block_size)
+    for _ in range(n_layer)
+])
+```
+
+`train.py` 里：
+```python
+n_layer = 4
+
+model = Model(
+    n_embd=64,
+    block_size=block_size,
+    vocab_size=tok.vocab_size,
+    num_heads=4,
+    n_layer=n_layer,
+)
+```
+
+### Q：Dropout 什么时候加？加在哪里？
+等 `estimate_loss()` 跑起来后，如果发现 train loss 明显低于 val loss，说明模型可能过拟合，可以加 Dropout。
+常见位置：
+- MultiHeadAttention 的 `proj` 后。
+- FeedForward 的最后一层后。
+
+Dropout 的作用是训练时随机把一部分神经元/通道临时置 0，逼模型不要死记硬背某几个固定特征。比如一个向量原来是：
+```text
+[0.8, -0.2, 1.5, 0.4, -0.9]
+```
+训练时可能随机变成：
+```text
+[0.8, 0, 1.5, 0.4, -0.9]
+```
+下一次又可能挡住别的位置。这样模型必须学到更结实的规律，而不是过分依赖某几个通道。
+
+注意：Dropout 只在 `model.train()` 时生效；`model.eval()` 后会自动关闭，所以生成时不会随机遮掉通道。
+
+例如 FFN：
+```python
+class FeedForward(nn.Module):
+    def __init__(self, n_embd: int, dropout: float):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
+```
+
+教学项目里可先用：
+```python
+dropout = 0.2
+```
 
 ---
 

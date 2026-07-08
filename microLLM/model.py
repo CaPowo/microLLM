@@ -2,23 +2,11 @@
 import torch
 import torch.nn as nn
 from  torch.nn import functional as F
-from attention import MultiHeadAttention
-
-class FeedForward(nn.Module):  #构造FFN
-    def __init__(self, n_embd: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-        )
-
-    def forward(self, x: torch.Tensor):
-        return self.net(x)
+from block import Block
 
 class Model(nn.Module):
     # 制作空白的“分数表”
-    def __init__(self,vocab_size:int,n_embd: int, block_size: int, num_heads: int):
+    def __init__(self,vocab_size:int,n_embd: int, block_size: int, num_heads: int, n_layer: int):
         super().__init__()
         assert n_embd % num_heads == 0
 
@@ -31,9 +19,12 @@ class Model(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size,n_embd)
 
         # 注意力头（这里引入多注意力头 num_heads= 决定头的数量）
-        self.sa_head = MultiHeadAttention(n_embd, num_heads=num_heads, block_size=block_size)        # 输出层：n_embd → vocab_size 个分数
+        self.blocks = nn.Sequential(*[
+            Block(n_embd, num_heads, block_size)
+            for _ in range(n_layer)
+        ])
         
-        self.ffn = FeedForward(n_embd)
+        self.ln_f = nn.LayerNorm(n_embd)
 
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
@@ -51,9 +42,9 @@ class Model(nn.Module):
         #相加
         x = tok_emb + pos_emb
 
-        x = self.sa_head(x)
+        x = self.blocks(x)
 
-        x = self.ffn(x)
+        x = self.ln_f(x)
 
         logits = self.lm_head(x)
 
@@ -79,7 +70,14 @@ class Model(nn.Module):
         return logits,loss
     
     @torch.no_grad() #生成时不需要训练，直接关闭求导
-    def generate(self, idx:torch.Tensor, max_new_tokens: int):
+    def generate(self, idx:torch.Tensor, max_new_tokens: int, temperature: float):
+        '''
+        0.7 更稳但可能重复
+        0.8 推荐先试
+        1.0 默认
+        1.2 更发散
+        '''
+        
         #idx:(B,T) 分块数量，每个分块的大小
         for _ in range(max_new_tokens):
 
@@ -90,6 +88,8 @@ class Model(nn.Module):
 
             #2. 只取最后一个位置预测
             logits = logits[:,-1,:]
+
+            logits = logits / temperature  # 增加 temperature
 
             #3. softmax 把分数变成概率
             probs = F.softmax(logits,dim=-1)
