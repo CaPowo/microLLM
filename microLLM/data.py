@@ -3,7 +3,7 @@
 import torch
 import random
 
-from tokenizer import Tokenizer
+from tokenizer import BaseTokenizer
 
 # 1) 读入整个文本文件（一长串字符）
 def read_file(filename: str) -> str:
@@ -12,7 +12,7 @@ def read_file(filename: str) -> str:
     return text
 
 # 用tokenizer整个文本编码成一维的long张量
-def make_data_tensor(text: str,tokenizer: Tokenizer)-> torch.Tensor:
+def make_data_tensor(text: str,tokenizer: BaseTokenizer)-> torch.Tensor:
     #使用 torch.tensor 函数构造张量 用dtype 明确类型
     token = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     return token

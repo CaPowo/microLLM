@@ -1,8 +1,29 @@
 from collections import Counter
 
 
-class Tokenizer:
-    # 字符级 tokenizer：每个不同字符都是一个 token。
+class BaseTokenizer:
+    name = "base"
+
+    def _set_vocab(self, vocab: list[str]):
+        self.vocab = list(vocab)
+        self.vocab_size = len(self.vocab)
+        self.stoi = {token: i for i, token in enumerate(self.vocab)}
+        self.itos = {i: token for i, token in enumerate(self.vocab)}
+
+    def to_config(self):
+        return {
+            "type": self.name,
+            "vocab": self.vocab,
+        }
+
+    def encode(self, s: str):
+        raise NotImplementedError
+
+    def decode(self, nums: list[int]):
+        return "".join(self.itos[i] for i in nums)
+
+
+class Tokenizer(BaseTokenizer):
     name = "char"
 
     def __init__(self, text: str, verbose: bool = True):
@@ -18,34 +39,25 @@ class Tokenizer:
 
     @classmethod
     def from_config(cls, config: dict, verbose: bool = True):
-        return cls.from_chars(config["chars"], verbose=verbose)
+        return cls.from_chars(config.get("chars", config["vocab"]), verbose=verbose)
 
     def _build_maps(self, verbose: bool = True):
-        self.vocab = list(self.chars)
-        self.vocab_size = len(self.vocab)
-        self.stoi = {token: i for i, token in enumerate(self.vocab)}
-        self.itos = {i: token for i, token in enumerate(self.vocab)}
+        self._set_vocab(list(self.chars))
         if verbose:
             print("\ntokenizer: char")
-            print("vocab_size（不同字符数）:", self.vocab_size)
-            print("所有字符:", "".join(self.chars))
+            print("vocab_size:", self.vocab_size)
+            print("chars:", "".join(self.chars))
 
     def to_config(self):
-        return {
-            "type": self.name,
-            "chars": self.chars,
-        }
+        config = super().to_config()
+        config["chars"] = self.chars
+        return config
 
-    # encode：字符串 -> 数字列表；decode：数字列表 -> 字符串
     def encode(self, s: str):
         return [self.stoi[c] for c in s]
 
-    def decode(self, nums: list[int]):
-        return "".join(self.itos[i] for i in nums)
 
-
-class BPETokenizer:
-    # 教学版 BPE：从字符开始，反复合并最常见的相邻 token 对。
+class BPETokenizer(BaseTokenizer):
     name = "bpe"
 
     def __init__(
@@ -57,9 +69,9 @@ class BPETokenizer:
         verbose: bool = True,
     ):
         if num_merges < 0:
-            raise ValueError("num_merges 必须大于等于 0。")
+            raise ValueError("num_merges must be >= 0.")
         if min_frequency < 2:
-            raise ValueError("min_frequency 建议至少为 2，否则会合并只出现一次的片段。")
+            raise ValueError("min_frequency should be at least 2.")
 
         self.initial_chars = sorted(set(vocab_text if vocab_text is not None else text))
         self.merges: list[tuple[str, str]] = []
@@ -67,10 +79,10 @@ class BPETokenizer:
 
         if verbose:
             print("\ntokenizer: bpe")
-            print("开始训练 BPE tokenizer...")
-            print("原始字符数:", len(tokens))
-            print("初始字符种类数:", len(self.initial_chars))
-            print("计划 merge 数量:", num_merges, flush=True)
+            print("training BPE tokenizer...")
+            print("raw chars:", len(tokens))
+            print("initial chars:", len(self.initial_chars))
+            print("planned merges:", num_merges, flush=True)
 
         for merge_idx in range(num_merges):
             stats = self._get_pair_stats(tokens)
@@ -107,7 +119,11 @@ class BPETokenizer:
         tokenizer = cls.__new__(cls)
         tokenizer.initial_chars = list(config["initial_chars"])
         tokenizer.merges = [tuple(pair) for pair in config["merges"]]
-        tokenizer.vocab = list(config["vocab"])
+        if "vocab" in config:
+            tokenizer.vocab = list(config["vocab"])
+        else:
+            merged_tokens = ["".join(pair) for pair in tokenizer.merges]
+            tokenizer.vocab = sorted(set(tokenizer.initial_chars) | set(merged_tokens))
         tokenizer._build_maps(verbose=verbose)
         tokenizer.merge_ranks = {pair: rank for rank, pair in enumerate(tokenizer.merges)}
         return tokenizer
@@ -131,24 +147,24 @@ class BPETokenizer:
         return tuple(out)
 
     def _build_maps(self, verbose: bool = True):
-        self.vocab_size = len(self.vocab)
-        self.stoi = {token: i for i, token in enumerate(self.vocab)}
-        self.itos = {i: token for i, token in enumerate(self.vocab)}
+        self._set_vocab(self.vocab)
 
         if verbose:
             preview = " / ".join(self.vocab[:40])
-            print("初始字符数:", len(self.initial_chars))
-            print("merge 数量:", len(self.merges))
+            print("initial chars:", len(self.initial_chars))
+            print("merge count:", len(self.merges))
             print("vocab_size:", self.vocab_size)
-            print("词表预览:", preview, flush=True)
+            print("vocab preview:", preview, flush=True)
 
     def to_config(self):
-        return {
-            "type": self.name,
-            "initial_chars": self.initial_chars,
-            "merges": [list(pair) for pair in self.merges],
-            "vocab": self.vocab,
-        }
+        config = super().to_config()
+        config.update(
+            {
+                "initial_chars": self.initial_chars,
+                "merges": [list(pair) for pair in self.merges],
+            }
+        )
+        return config
 
     def encode(self, s: str):
         if getattr(self, "_cached_text", None) == s:
@@ -157,7 +173,7 @@ class BPETokenizer:
 
     def encode_with_progress(self, s: str, chunk_size: int = 4096):
         if getattr(self, "_cached_text", None) == s:
-            print("复用 BPE 训练阶段缓存的 token id。", flush=True)
+            print("reusing cached BPE token ids.", flush=True)
             return list(self._cached_ids)
         return self._encode_chunks(s, chunk_size=chunk_size, show_progress=True)
 
@@ -197,9 +213,6 @@ class BPETokenizer:
 
         return [self.stoi[token] for token in tokens]
 
-    def decode(self, nums: list[int]):
-        return "".join(self.itos[i] for i in nums)
-
 
 def build_tokenizer(
     text: str,
@@ -219,7 +232,7 @@ def build_tokenizer(
             vocab_text=vocab_text,
             verbose=verbose,
         )
-    raise ValueError(f"未知 tokenizer 类型: {tokenizer_type}")
+    raise ValueError(f"unknown tokenizer type: {tokenizer_type}")
 
 
 def tokenizer_from_config(config: dict, verbose: bool = True):
@@ -228,4 +241,4 @@ def tokenizer_from_config(config: dict, verbose: bool = True):
         return Tokenizer.from_config(config, verbose=verbose)
     if tokenizer_type == "bpe":
         return BPETokenizer.from_config(config, verbose=verbose)
-    raise ValueError(f"未知 tokenizer 类型: {tokenizer_type}")
+    raise ValueError(f"unknown tokenizer type: {tokenizer_type}")
